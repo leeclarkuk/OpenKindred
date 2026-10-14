@@ -1,0 +1,19 @@
+apiVersion: openkindred.io/v1alpha1
+kind: Model
+metadata:
+  name: default
+  namespace: demo
+spec:
+  provider: openai-compatible
+  model: example-model
+  endpoint: http://vllm.models.svc:8000/v1
+---
+apiVersion: openkindred.io/v1alpha1
+kind: McpServer
+metadata:
+  name: docs-search
+  namespace: demo
+spec:
+  transport: streamable-http
+  url: http://docs-search.tools.svc:8080/mcp
+  allowedTools: [search, fetch]

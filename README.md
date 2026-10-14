@@ -35,7 +35,7 @@ api/v1alpha1/  Custom resource definitions (Model, McpServer, Agent)
 platform/
   hub/          Hub control plane (ArgoCD, Crossplane, KubeVela)
   spoke/        Spoke cluster baseline
-  crossplane/   Compositions and XRDs
+  crossplane/   Compositions and XRDs (agent/: the Agent composite, not yet wired to the hub)
   kubevela/     Application definitions and traits
 runtime/        Go runtime that executes one Agent
 agents/

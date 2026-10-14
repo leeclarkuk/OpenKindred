@@ -1,0 +1,124 @@
+# Agent as a Crossplane composite (Crossplane v2, namespaced).
+#
+# This defines agents.openkindred.io. The same name is currently served by the plain CRD in
+# api/v1alpha1/agent.yaml, so this file must not be applied to a cluster that has that CRD
+# until the handover in docs/adr/0001-agent-lifecycle.md has been done.
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: agents.openkindred.io
+spec:
+  scope: Namespaced
+  group: openkindred.io
+  names:
+    kind: Agent
+    listKind: AgentList
+    plural: agents
+    singular: agent
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      additionalPrinterColumns:
+        - name: Model
+          type: string
+          jsonPath: .spec.modelRef.name
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Resolved
+          type: string
+          jsonPath: .status.conditions[?(@.type=="ReferencesResolved")].status
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [modelRef, instructions]
+              # The first runtime supports a model, instructions and MCP tools only. Anything
+              # else is rejected at admission rather than accepted and ignored. Relax a rule in
+              # the release that implements the capability.
+              x-kubernetes-validations:
+                - rule: "!has(self.memory) || !has(self.memory.enabled) || !self.memory.enabled"
+                  message: "memory is not supported by this runtime version"
+                - rule: "!has(self.browser) || !has(self.browser.enabled) || !self.browser.enabled"
+                  message: "browser is not supported by this runtime version"
+                - rule: "!has(self.codeInterpreter) || !has(self.codeInterpreter.enabled) || !self.codeInterpreter.enabled"
+                  message: "codeInterpreter is not supported by this runtime version"
+                - rule: "!has(self.peers) || size(self.peers) == 0"
+                  message: "peers (A2A) are not supported by this runtime version"
+                - rule: "!has(self.tools) || self.tools.all(a, self.tools.exists_one(b, b.mcpServerRef.name == a.mcpServerRef.name))"
+                  message: "each McpServer may be listed once"
+              properties:
+                modelRef:
+                  type: object
+                  required: [name]
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                instructions:
+                  type: string
+                  minLength: 1
+                  description: System prompt.
+                tools:
+                  type: array
+                  description: MCP servers this agent may call.
+                  items:
+                    type: object
+                    required: [mcpServerRef]
+                    properties:
+                      mcpServerRef:
+                        type: object
+                        required: [name]
+                        properties:
+                          name:
+                            type: string
+                            pattern: '^[a-zA-Z0-9-]{1,32}$'
+                      allowedTools:
+                        type: array
+                        description: Omitted means no restriction from the Agent. An empty list means no tools.
+                        items:
+                          type: string
+                memory:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    scope:
+                      type: string
+                      enum: [session, agent, namespace]
+                      default: session
+                browser:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                codeInterpreter:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    runtimeClassName:
+                      type: string
+                peers:
+                  type: array
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                      cluster:
+                        type: string
+            status:
+              type: object
+              properties:
+                configHash:
+                  type: string
+                  description: Content hash of the runtime configuration currently rendered.
+                endpoint:
+                  type: string
+                  description: In-cluster URL of the runtime.

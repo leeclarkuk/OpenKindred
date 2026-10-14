@@ -1,0 +1,22 @@
+# Crossplane composes plain Kubernetes resources directly (no provider), so its service
+# account needs rights on them, and read access to the resources the composition looks up.
+# The aggregate-to-crossplane label is what the Crossplane chart's ClusterRole selects on.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-openkindred-agents
+  labels:
+    rbac.crossplane.io/aggregate-to-crossplane: "true"
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts, services, configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [openkindred.io]
+    resources: [models, mcpservers]
+    verbs: [get, list, watch]

@@ -145,7 +145,8 @@ The non-secret configuration hash does not change when a Secret's contents chang
 in-place edit of a Secret does **not** restart the runtime. First implementation:
 
 - Credentials are rotated by creating a new Secret and pointing `Model.credentialsRef` at it.
-  The name is part of the resolved configuration, so the hash changes and the Agent rolls.
+  The Secret name is in the pod's `secretKeyRef`, not in the configuration, so the pod
+  template changes and the Agent rolls while the ConfigMap stays the same.
 - Editing a Secret in place is unsupported. Operators who do it must restart the Agent by
   deleting its pods. Doing this through a Deployment annotation would conflict with
   Crossplane's ownership of the Deployment.
@@ -186,18 +187,25 @@ Composition, then Agents (sync waves).
 `ExtraResources` document naming what it needs by name or label, and Crossplane returns them
 to the template in `extraResources`. That is enough to read the `Model` and `McpServer`
 resources, so **no separate fetching function is needed**. Its template functions include
-`sha256sum`, so a content-addressed ConfigMap name is possible in the template.
+`sha256sum` and `include`, which give the content-addressed ConfigMap name and a hash of the
+pod spec.
 
-Not yet verified, and needed before writing the composition:
+Checked by rendering the composition with the Crossplane render engine
+(`hack/test-composition.py`, see `docs/composition.md`):
 
-- Whether lookups of namespaced resources can be scoped to the Agent's namespace. The
-  documented requirement fields are `apiVersion`, `kind`, `matchName` and `matchLabels`, and
-  I found no namespace field.
-- Whether Crossplane v2 renames this mechanism ("required resources") and what the function
-  expects on the version we install.
-- How the composite reports per-reference failures as conditions from a template.
+- Lookups can be scoped to a namespace: the requirement takes a `namespace` field, and without
+  it a namespaced `Model` is not found. A resource in another namespace is not used.
+- Custom conditions (`ReferencesResolved`, `WorkloadAvailable`) are set on a namespaced
+  composite through `ClaimConditions` with target `Composite`. `Ready` and `Synced` are
+  reserved.
+- The engine and function are Crossplane 2.4.2 and function-go-templating 0.13.0. The CLI's
+  flag for supplying these resources is now `--required-resources`, and `--extra-resources` is
+  deprecated, but the function still uses `ExtraResources`. This should be rechecked on
+  upgrades.
 
-If namespace scoping is not possible, the fallback is a small function written in Go.
+Not checked: the rendering uses a fake client, so nothing here exercises real watches, RBAC, or
+the poll interval. The function package (`xpkg.crossplane.io/...:v0.13.0`) has not been
+confirmed installable from the registry.
 
 ## Rejected
 
