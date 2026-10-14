@@ -46,3 +46,7 @@ examples/       Minimal worked examples
 ## Contributing
 
 Open an issue before large changes. Keep changes declarative and reviewable.
+
+## Licence
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
