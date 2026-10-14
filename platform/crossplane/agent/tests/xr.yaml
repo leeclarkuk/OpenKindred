@@ -1,0 +1,12 @@
+apiVersion: openkindred.io/v1alpha1
+kind: Agent
+metadata:
+  name: helper
+  namespace: demo
+spec:
+  modelRef:
+    name: default
+  instructions: Answer using the docs-search tool.
+  tools:
+    - mcpServerRef:
+        name: docs-search

@@ -1,0 +1,292 @@
+# Turns an Agent into a running runtime: ServiceAccount, immutable content-hashed ConfigMap,
+# Deployment (Recreate), Service and NetworkPolicy. See docs/adr/0001-agent-lifecycle.md.
+#
+# The template reads the Model and McpServers the Agent names (same namespace) with the
+# function's ExtraResources requirement, renders the runtime configuration (the contract is
+# runtime/internal/config), and fails closed: an unresolved reference never removes resources.
+# It records the reason in the configuration, and the runtime then refuses to execute.
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: agents.openkindred.io
+spec:
+  compositeTypeRef:
+    apiVersion: openkindred.io/v1alpha1
+    kind: Agent
+  mode: Pipeline
+  pipeline:
+    - step: render
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- /* The runtime image is the one value that changes per release. */ -}}
+            {{- $image := "ghcr.io/leeclarkuk/openkindred-runtime:0.1.0" -}}
+
+            {{- /* Pod spec, as text so that it can be hashed. Argument: a dict. */ -}}
+            {{- define "podSpec" -}}
+            serviceAccountName: {{ .name }}
+            automountServiceAccountToken: false
+            terminationGracePeriodSeconds: 45
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: runtime
+                image: {{ .image | quote }}
+                args:
+                  - --config=/etc/openkindred/config.json
+                  - --addr=:8080
+                  - --shutdown-delay=5s
+                ports:
+                  - name: http
+                    containerPort: 8080
+                {{- if .secretName }}
+                env:
+                  - name: OPENKINDRED_MODEL_API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ .secretName | quote }}
+                        key: {{ .secretKey | quote }}
+                {{- end }}
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: http
+                  periodSeconds: 5
+                  failureThreshold: 2
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: http
+                  periodSeconds: 10
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    memory: 256Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: [ALL]
+                volumeMounts:
+                  - name: config
+                    mountPath: /etc/openkindred
+                    readOnly: true
+            volumes:
+              - name: config
+                configMap:
+                  name: {{ .configMap }}
+            {{- end -}}
+
+            {{- $xr := .observed.composite.resource -}}
+            {{- $ns := $xr.metadata.namespace -}}
+            {{- $name := $xr.metadata.name -}}
+            {{- $er := .extraResources | default dict -}}
+            {{- $observed := .observed.resources | default dict -}}
+
+            {{- /* Resolve references. */ -}}
+            {{- $unresolved := list -}}
+            {{- $model := dict -}}
+            {{- $m := index $er "model" | default dict -}}
+            {{- if $m.items -}}
+              {{- $model = (index $m.items 0).resource -}}
+            {{- else -}}
+              {{- $unresolved = append $unresolved (dict "kind" "Model" "name" $xr.spec.modelRef.name "reason" "not found in the Agent's namespace") -}}
+            {{- end -}}
+
+            {{- $mcfg := dict "provider" (dig "spec" "provider" "" $model) "name" (dig "spec" "model" "" $model) "endpoint" (dig "spec" "endpoint" "" $model) -}}
+            {{- $cred := dig "spec" "credentialsRef" (dict) $model -}}
+            {{- $secretName := dig "name" "" $cred -}}
+            {{- $secretKey := dig "key" "api-key" $cred -}}
+            {{- if $secretName -}}
+              {{- $_ := set $mcfg "apiKeyEnv" "OPENKINDRED_MODEL_API_KEY" -}}
+            {{- end -}}
+            {{- $maxTokens := dig "spec" "limits" "maxTokens" 0 $model | int -}}
+            {{- if $maxTokens -}}
+              {{- $_ := set $mcfg "maxOutputTokens" $maxTokens -}}
+            {{- end -}}
+
+            {{- $servers := list -}}
+            {{- range $xr.spec.tools -}}
+              {{- $ref := .mcpServerRef.name -}}
+              {{- $s := index $er (printf "mcp-%s" $ref) | default dict -}}
+              {{- if $s.items -}}
+                {{- $res := (index $s.items 0).resource -}}
+                {{- $url := dig "spec" "url" "" $res -}}
+                {{- if not $url -}}
+                  {{- $unresolved = append $unresolved (dict "kind" "McpServer" "name" $ref "reason" "has no url; image based servers are not supported yet") -}}
+                {{- else -}}
+                  {{- $srv := dict "name" $ref "url" $url -}}
+                  {{- $serverSide := dig "spec" "allowedTools" "absent" $res -}}
+                  {{- if kindIs "slice" $serverSide -}}
+                    {{- $_ := set $srv "allowedTools" $serverSide -}}
+                  {{- end -}}
+                  {{- if hasKey . "allowedTools" -}}
+                    {{- $_ := set $srv "agentAllowedTools" (.allowedTools | default list) -}}
+                  {{- end -}}
+                  {{- $servers = append $servers $srv -}}
+                {{- end -}}
+              {{- else -}}
+                {{- $unresolved = append $unresolved (dict "kind" "McpServer" "name" $ref "reason" "not found in the Agent's namespace") -}}
+              {{- end -}}
+            {{- end -}}
+
+            {{- /* Runtime configuration, content addressed. */ -}}
+            {{- $cfg := dict "model" $mcfg "instructions" $xr.spec.instructions "mcpServers" $servers "unresolved" $unresolved -}}
+            {{- $cfgJSON := $cfg | toJson -}}
+            {{- $hash := $cfgJSON | sha256sum | trunc 12 -}}
+            {{- $cmName := printf "%s-config-%s" $name $hash -}}
+
+            {{- $podSpec := include "podSpec" (dict "name" $name "image" $image "configMap" $cmName "secretName" $secretName "secretKey" $secretKey) -}}
+            {{- $podHash := $podSpec | sha256sum | trunc 12 -}}
+
+            {{- /* Rollout state of the Deployment as observed. */ -}}
+            {{- $dep := dict -}}
+            {{- with (index $observed "deployment") -}}{{- $dep = .resource -}}{{- end -}}
+            {{- $rolledOut := false -}}
+            {{- if $dep -}}
+              {{- $seen := dig "spec" "template" "metadata" "annotations" "openkindred.io/template-hash" "" $dep -}}
+              {{- $generationSeen := eq (dig "status" "observedGeneration" 0 $dep | int) (dig "metadata" "generation" -1 $dep | int) -}}
+              {{- $all := and (eq (dig "status" "updatedReplicas" 0 $dep | int) 1) (eq (dig "status" "replicas" 0 $dep | int) 1) (eq (dig "status" "availableReplicas" 0 $dep | int) 1) (eq (dig "status" "unavailableReplicas" 0 $dep | int) 0) -}}
+              {{- $rolledOut = and $generationSeen $all (eq $seen $podHash) -}}
+            {{- end -}}
+            {{- $resolved := not $unresolved -}}
+            {{- $depReady := and $resolved $rolledOut -}}
+
+            {{- $labels := dict "app.kubernetes.io/name" "openkindred-agent" "app.kubernetes.io/instance" $name "app.kubernetes.io/managed-by" "crossplane" -}}
+            ---
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: ExtraResources
+            requirements:
+              model:
+                apiVersion: openkindred.io/v1alpha1
+                kind: Model
+                matchName: {{ $xr.spec.modelRef.name }}
+                namespace: {{ $ns }}
+            {{- range $xr.spec.tools }}
+              mcp-{{ .mcpServerRef.name }}:
+                apiVersion: openkindred.io/v1alpha1
+                kind: McpServer
+                matchName: {{ .mcpServerRef.name }}
+                namespace: {{ $ns }}
+            {{- end }}
+            ---
+            apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: {{ $name }}
+              namespace: {{ $ns }}
+              labels: {{ $labels | toJson }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: service-account
+                gotemplating.fn.crossplane.io/ready: "True"
+            automountServiceAccountToken: false
+            ---
+            apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: {{ $cmName }}
+              namespace: {{ $ns }}
+              labels: {{ $labels | toJson }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: config
+                gotemplating.fn.crossplane.io/ready: "True"
+            immutable: true
+            data:
+              config.json: {{ $cfgJSON | quote }}
+            ---
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: {{ $name }}
+              namespace: {{ $ns }}
+              labels: {{ $labels | toJson }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: deployment
+                gotemplating.fn.crossplane.io/ready: {{ $depReady | ternary "True" "False" | quote }}
+            spec:
+              replicas: 1
+              strategy:
+                type: Recreate
+              selector:
+                matchLabels: {{ $labels | toJson }}
+              template:
+                metadata:
+                  labels: {{ $labels | toJson }}
+                  annotations:
+                    openkindred.io/template-hash: {{ $podHash | quote }}
+                spec:
+                  {{- $podSpec | nindent 6 }}
+            ---
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: {{ $name }}
+              namespace: {{ $ns }}
+              labels: {{ $labels | toJson }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: service
+                gotemplating.fn.crossplane.io/ready: "True"
+            spec:
+              type: ClusterIP
+              selector: {{ $labels | toJson }}
+              ports:
+                - name: http
+                  port: 80
+                  targetPort: http
+            ---
+            # Ingress only from pods in the same namespace. Egress is open except to link-local
+            # addresses, which blocks cloud metadata endpoints. Narrowing egress to the model and
+            # tool endpoints is future work.
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: {{ $name }}
+              namespace: {{ $ns }}
+              labels: {{ $labels | toJson }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: network-policy
+                gotemplating.fn.crossplane.io/ready: "True"
+            spec:
+              podSelector:
+                matchLabels: {{ $labels | toJson }}
+              policyTypes: [Ingress, Egress]
+              ingress:
+                - from:
+                    - podSelector: {}
+                  ports:
+                    - port: 8080
+                      protocol: TCP
+              egress:
+                - to:
+                    - ipBlock:
+                        cidr: 0.0.0.0/0
+                        except: [169.254.0.0/16]
+            ---
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: ClaimConditions
+            conditions:
+              - type: ReferencesResolved
+                status: {{ $resolved | ternary "True" "False" | quote }}
+                reason: {{ $resolved | ternary "AllResolved" "ReferenceNotResolved" }}
+                message: {{ $resolved | ternary "Model and tool servers found" (printf "%s" (toJson $unresolved)) | quote }}
+                target: Composite
+              - type: WorkloadAvailable
+                status: {{ $rolledOut | ternary "True" "False" | quote }}
+                reason: {{ $rolledOut | ternary "RolloutComplete" "RolloutInProgress" }}
+                message: {{ $rolledOut | ternary "The current configuration is serving" "Waiting for the Deployment to serve the current configuration" | quote }}
+                target: Composite
+            ---
+            apiVersion: openkindred.io/v1alpha1
+            kind: Agent
+            status:
+              configHash: {{ $hash | quote }}
+              endpoint: {{ printf "http://%s.%s.svc" $name $ns | quote }}
