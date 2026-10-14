@@ -29,6 +29,8 @@ func TestListToolsFollowsPagination(t *testing.T) {
 		}
 		res := map[string]any{}
 		switch {
+		case req.Method == "initialize":
+			res = map[string]any{"protocolVersion": "2025-06-18"}
 		case req.Method == "tools/list" && req.Params.Cursor == "":
 			res = map[string]any{"tools": []map[string]string{{"name": "a"}}, "nextCursor": "p2"}
 		case req.Method == "tools/list":

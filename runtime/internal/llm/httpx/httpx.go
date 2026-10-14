@@ -5,10 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 
 	"github.com/leeclarkuk/openkindred/runtime/internal/errs"
+	"github.com/leeclarkuk/openkindred/runtime/internal/limitio"
 )
 
 const maxResponseBytes = 8 << 20
@@ -34,15 +35,18 @@ func PostJSON(ctx context.Context, c *http.Client, url string, headers map[strin
 		if ce := errs.FromContext(ctx); ce != nil {
 			return nil, ce
 		}
-		return nil, errs.Wrap(errs.Unavailable, err, "model request failed")
+		return nil, errs.Wrap(errs.Unavailable, errs.Cause(err), "model request failed")
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	data, err := limitio.ReadAll(resp.Body, maxResponseBytes)
 	if err != nil {
 		if ce := errs.FromContext(ctx); ce != nil {
 			return nil, ce
 		}
-		return nil, errs.Wrap(errs.Unavailable, err, "read model response")
+		if errors.Is(err, limitio.ErrTooLarge) {
+			return nil, errs.New(errs.Unavailable, "model response exceeded %d bytes", maxResponseBytes)
+		}
+		return nil, errs.Wrap(errs.Unavailable, errs.Cause(err), "read model response")
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return data, nil

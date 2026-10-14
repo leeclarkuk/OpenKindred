@@ -256,7 +256,7 @@ func TestCancellationDuringToolCall(t *testing.T) {
 	}
 }
 
-func TestToolTimeoutIsReportedToModelNotFatal(t *testing.T) {
+func TestToolTimeoutReportsUnknownOutcomeNotFailure(t *testing.T) {
 	forEachAdapter(t, func(t *testing.T, ad adapter) {
 		mcpSrv := mcptest.New(t, false, mcptest.Tool{Name: "slow", Delay: 5 * time.Second, Handler: func(json.RawMessage) (string, bool) { return "late", false }})
 		p, model := ad.make(t,
@@ -267,8 +267,11 @@ func TestToolTimeoutIsReportedToModelNotFatal(t *testing.T) {
 		if err != nil || res.Output != "gave up on the tool" {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
-		if !strings.Contains(string(model.Bodies()[1]), "timed out") {
-			t.Fatal("model was not told the tool timed out")
+		if !strings.Contains(string(model.Bodies()[1]), "UNKNOWN") {
+			t.Fatal("model was not told the outcome is unknown")
+		}
+		if len(res.ToolCalls) != 1 || res.ToolCalls[0].Outcome != agent.OutcomeUnknown {
+			t.Fatalf("outcome not recorded: %+v", res.ToolCalls)
 		}
 	})
 }
@@ -344,5 +347,101 @@ func TestLoopWithFakeModel(t *testing.T) {
 	tr := last[len(last)-1].ToolResults
 	if len(tr) != 1 || tr[0].CallID != "1" || !strings.Contains(tr[0].Content, `{"q":1}`) {
 		t.Fatalf("tool result not threaded back: %+v", tr)
+	}
+}
+
+func slowTool() mcptest.Tool {
+	return mcptest.Tool{Name: "pay", Delay: 5 * time.Second, Handler: func(json.RawMessage) (string, bool) { return "paid", false }}
+}
+
+func TestUnknownOutcomeIsNeverRetriedAndIdenticalRepeatsAreRefused(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, ad adapter) {
+		mcpSrv := mcptest.New(t, false, slowTool())
+		call := llmtest.Call{ID: "c", Name: "docs__pay", Args: `{"amount": 10}`}
+		sameButSpaced := llmtest.Call{ID: "d", Name: "docs__pay", Args: `{"amount":10}`}
+		p, model := ad.make(t,
+			llmtest.Step{Calls: []llmtest.Call{call}},
+			llmtest.Step{Calls: []llmtest.Call{sameButSpaced}}, // the model tries again
+			llmtest.Step{Text: "I could not confirm the payment"})
+		a := newAgent(t, p, toolset(t, mcpSrv, nil, nil), func(c *agent.Config) { c.ToolTimeout = 150 * time.Millisecond })
+		res, err := a.Invoke(context.Background(), "pay")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mcpSrv.Calls("pay") != 1 {
+			t.Fatalf("a potentially consequential call was repeated: ran %d times", mcpSrv.Calls("pay"))
+		}
+		if len(res.ToolCalls) != 2 || res.ToolCalls[0].Outcome != agent.OutcomeUnknown || res.ToolCalls[1].Outcome != agent.OutcomeRefused {
+			t.Fatalf("trace: %+v", res.ToolCalls)
+		}
+		if !strings.Contains(string(model.Bodies()[2]), "will not be repeated") {
+			t.Fatal("model was not told the repeat was refused")
+		}
+	})
+}
+
+func TestDifferentArgumentsAreNotBlockedByAnUnknownOutcome(t *testing.T) {
+	p := fake.New(llm.Capabilities{ToolCalling: true},
+		llm.Response{Stop: llm.StopToolUse, Message: llm.Message{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "docs__pay", Args: json.RawMessage(`{"a":1}`)}}}},
+		llm.Response{Stop: llm.StopToolUse, Message: llm.Message{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "2", Name: "docs__pay", Args: json.RawMessage(`{"a":2}`)}}}},
+		llm.Response{Stop: llm.StopEnd, Message: llm.Message{Role: llm.Assistant, Text: "done"}})
+	drop := mcptest.New(t, false, mcptest.Tool{Name: "pay", Handler: func(json.RawMessage) (string, bool) { return "x", false }})
+	set := toolset(t, drop, nil, nil)
+	drop.DropAfterRun = true
+	a := newAgent(t, p, set, nil)
+	res, err := a.Invoke(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drop.Calls("pay") != 2 {
+		t.Fatalf("a call with different arguments is a different call; ran %d times", drop.Calls("pay"))
+	}
+	if res.ToolCalls[0].Outcome != agent.OutcomeUnknown || res.ToolCalls[1].Outcome != agent.OutcomeUnknown {
+		t.Fatalf("trace: %+v", res.ToolCalls)
+	}
+}
+
+func TestLostConnectionIsReportedAsUnknownToTheModel(t *testing.T) {
+	forEachAdapter(t, func(t *testing.T, ad adapter) {
+		mcpSrv := mcptest.New(t, false, echoTool("pay"))
+		p, model := ad.make(t,
+			llmtest.Step{Calls: []llmtest.Call{{ID: "c", Name: "docs__pay", Args: `{}`}}},
+			llmtest.Step{Text: "unsure"})
+		set := toolset(t, mcpSrv, nil, nil)
+		mcpSrv.DropAfterRun = true
+		a := newAgent(t, p, set, nil)
+		if _, err := a.Invoke(context.Background(), "x"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(model.Bodies()[1]), "UNKNOWN") {
+			t.Fatal("a dropped connection after the call was sent must be reported as unknown, not as a failure")
+		}
+	})
+}
+
+func TestRequestEndingMidToolCallSaysOutcomeUnknown(t *testing.T) {
+	mcpSrv := mcptest.New(t, false, slowTool())
+	p, _ := adapters[0].make(t, llmtest.Step{Calls: []llmtest.Call{{ID: "c", Name: "docs__pay", Args: `{}`}}})
+	a := newAgent(t, p, toolset(t, mcpSrv, nil, nil), func(c *agent.Config) {
+		c.RequestTimeout = 200 * time.Millisecond
+		c.ToolTimeout = 3 * time.Second
+	})
+	_, err := a.Invoke(context.Background(), "x")
+	if errs.KindOf(err) != errs.Timeout || !strings.Contains(err.Error(), "outcome is unknown") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOversizedModelResponseIsReported(t *testing.T) {
+	huge := strings.Repeat("a", 9<<20)
+	for _, ad := range adapters {
+		t.Run(ad.name, func(t *testing.T) {
+			p, _ := ad.make(t, llmtest.Step{Text: huge})
+			a := newAgent(t, p, nil, nil)
+			_, err := a.Invoke(context.Background(), "x")
+			if err == nil || !strings.Contains(err.Error(), "exceeded") {
+				t.Fatalf("want a clear size error, got %v", err)
+			}
+		})
 	}
 }

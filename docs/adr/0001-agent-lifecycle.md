@@ -135,6 +135,14 @@ validation rules, `memory.enabled`, `browser.enabled` and `codeInterpreter.enabl
 true, and `peers`. Each is enabled by relaxing the rule in the release that implements it.
 The hello example drops `memory` until then.
 
+### Concurrency and tool outcomes
+
+Per-request timeouts and tool limits do not bound aggregate resource use, so the runtime caps
+concurrent invocations (`limits.maxConcurrent`, default 8) and rejects the excess with an
+`overloaded` response rather than queueing it. A tool call is made at most once; a timeout or
+lost connection is reported as an unknown outcome, never as a failure, and an identical call is
+not repeated within the invocation. Details are in `docs/runtime.md`.
+
 ### Credentials and rotation
 
 `Model.credentialsRef` is passed to the workload as a Secret reference (environment from

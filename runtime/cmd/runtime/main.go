@@ -45,4 +45,5 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("shutdown", "error", err.Error())
 	}
+	a.Close()
 }
