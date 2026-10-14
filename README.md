@@ -37,6 +37,7 @@ platform/
   spoke/        Spoke cluster baseline
   crossplane/   Compositions and XRDs
   kubevela/     Application definitions and traits
+runtime/        Go runtime that executes one Agent
 agents/
   finserv/      Multi-agent financial-services pattern
   nightforge/   Autonomous coding pipeline
