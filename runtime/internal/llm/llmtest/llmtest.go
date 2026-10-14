@@ -30,6 +30,10 @@ type Step struct {
 	Delay time.Duration
 	// Status, when set, replies with this HTTP status and an error body instead.
 	Status int
+	// Release, when set, holds the request open until the channel is closed.
+	Release <-chan struct{}
+	// ErrorMessage is the message in an error body, used with Status.
+	ErrorMessage string
 	// MaxTokens ends the reply as truncated.
 	MaxTokens bool
 }
@@ -58,7 +62,7 @@ func (s *Server) Headers() []http.Header {
 
 type encoder func(Step) (any, int)
 
-func newServer(t *testing.T, protocol, path string, enc encoder, errBody func(status int) any, steps []Step) *Server {
+func newServer(t *testing.T, protocol, path string, enc encoder, errBody func(Step) any, steps []Step) *Server {
 	s := &Server{steps: steps, Protocol: protocol}
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +85,13 @@ func newServer(t *testing.T, protocol, path string, enc encoder, errBody func(st
 			<-r.Context().Done()
 			return
 		}
+		if step.Release != nil {
+			select {
+			case <-step.Release:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if step.Delay > 0 {
 			select {
 			case <-time.After(step.Delay):
@@ -91,7 +102,7 @@ func newServer(t *testing.T, protocol, path string, enc encoder, errBody func(st
 		w.Header().Set("Content-Type", "application/json")
 		if step.Status != 0 {
 			w.WriteHeader(step.Status)
-			_ = json.NewEncoder(w).Encode(errBody(step.Status))
+			_ = json.NewEncoder(w).Encode(errBody(step))
 			return
 		}
 		resp, _ := enc(step)
@@ -100,6 +111,13 @@ func newServer(t *testing.T, protocol, path string, enc encoder, errBody func(st
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	return s
+}
+
+func errMsg(st Step) string {
+	if st.ErrorMessage != "" {
+		return st.ErrorMessage
+	}
+	return "provider says no"
 }
 
 func raw(s string) json.RawMessage {
@@ -131,8 +149,8 @@ func NewAnthropic(t *testing.T, steps ...Step) *Server {
 			"stop_reason": stop, "usage": map[string]int{"input_tokens": 10, "output_tokens": 5},
 		}, 200
 	}
-	errBody := func(int) any {
-		return map[string]any{"type": "error", "error": map[string]string{"type": "x", "message": "provider says no"}}
+	errBody := func(st Step) any {
+		return map[string]any{"type": "error", "error": map[string]string{"type": "x", "message": errMsg(st)}}
 	}
 	return newServer(t, "anthropic", "/v1/messages", enc, errBody, steps)
 }
@@ -166,8 +184,8 @@ func NewOpenAI(t *testing.T, steps ...Step) *Server {
 			"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5},
 		}, 200
 	}
-	errBody := func(int) any {
-		return map[string]any{"error": map[string]string{"message": "provider says no"}}
+	errBody := func(st Step) any {
+		return map[string]any{"error": map[string]string{"message": errMsg(st)}}
 	}
 	return newServer(t, "openai", "/v1/chat/completions", enc, errBody, steps)
 }

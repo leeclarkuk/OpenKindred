@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 )
 
 type Kind string
@@ -32,6 +33,11 @@ const (
 	Timeout Kind = "timeout"
 	// Canceled means the caller went away.
 	Canceled Kind = "canceled"
+	// Overloaded means the runtime is at its concurrency limit. The request was not started.
+	Overloaded Kind = "overloaded"
+	// OutcomeUnknown means a tool call may or may not have taken effect. Callers must
+	// not assume it failed, and must not repeat it blindly.
+	OutcomeUnknown Kind = "outcome_unknown"
 	// Internal is anything else.
 	Internal Kind = "internal"
 )
@@ -65,6 +71,16 @@ func New(kind Kind, format string, args ...any) *Error {
 
 func Wrap(kind Kind, err error, format string, args ...any) *Error {
 	return &Error{Kind: kind, Message: fmt.Sprintf(format, args...), Err: err}
+}
+
+// Cause strips the URL that net/http puts in transport errors, which can carry
+// credentials in userinfo or query strings.
+func Cause(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 // KindOf returns the kind of err, mapping context errors and defaulting to Internal.

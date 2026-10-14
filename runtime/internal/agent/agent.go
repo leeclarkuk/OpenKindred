@@ -3,7 +3,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -41,9 +43,19 @@ func New(cfg Config) (*Agent, error) {
 	return &Agent{cfg: cfg}, nil
 }
 
+// Outcome values for a tool call that did not simply succeed or fail.
+const (
+	// OutcomeUnknown: the call may have taken effect. It was not retried.
+	OutcomeUnknown = "unknown"
+	// OutcomeRefused: the call was not made because an identical earlier call in the
+	// same invocation had an unknown outcome.
+	OutcomeRefused = "refused"
+)
+
 type ToolCallRecord struct {
 	Name    string `json:"name"`
 	Blocked bool   `json:"blocked,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
 
@@ -69,6 +81,7 @@ func (a *Agent) Invoke(ctx context.Context, input string) (Result, error) {
 		specs = a.cfg.Tools.Specs()
 	}
 	msgs := []llm.Message{{Role: llm.User, Text: input}}
+	unknown := map[string]bool{} // calls whose outcome is unknown, by name and arguments
 	var res Result
 	for {
 		if ce := errs.FromContext(ctx); ce != nil {
@@ -102,7 +115,7 @@ func (a *Agent) Invoke(ctx context.Context, input string) (Result, error) {
 			if len(res.ToolCalls) >= a.cfg.MaxToolCalls {
 				return res, errs.New(errs.LimitExceeded, "tool call limit of %d reached", a.cfg.MaxToolCalls)
 			}
-			tr, rec, err := a.runTool(ctx, call)
+			tr, rec, err := a.runTool(ctx, call, unknown)
 			if err != nil {
 				return res, err
 			}
@@ -113,10 +126,24 @@ func (a *Agent) Invoke(ctx context.Context, input string) (Result, error) {
 	}
 }
 
+// callKey identifies a call by tool and canonical arguments.
+func callKey(call llm.ToolCall) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, call.Args); err != nil {
+		buf.Reset()
+		buf.Write(call.Args)
+	}
+	return call.Name + "\x00" + buf.String()
+}
+
 // runTool never returns an error for a tool that merely failed or was refused: the
 // model is told, and may recover. It returns an error only when the whole request
 // must stop, which is when ctx has ended.
-func (a *Agent) runTool(ctx context.Context, call llm.ToolCall) (llm.ToolResult, ToolCallRecord, error) {
+//
+// A call is made at most once. A timeout or a lost connection does not show that a
+// tool stopped or that its action failed, so the model is told the outcome is
+// unknown, and an identical call is not made again in this invocation.
+func (a *Agent) runTool(ctx context.Context, call llm.ToolCall, unknown map[string]bool) (llm.ToolResult, ToolCallRecord, error) {
 	rec := ToolCallRecord{Name: call.Name}
 	fail := func(msg string) (llm.ToolResult, ToolCallRecord, error) {
 		rec.Error = msg
@@ -126,19 +153,31 @@ func (a *Agent) runTool(ctx context.Context, call llm.ToolCall) (llm.ToolResult,
 		rec.Blocked = true
 		return fail(fmt.Sprintf("tool %q is not permitted", call.Name))
 	}
+	key := callKey(call)
+	if unknown[key] {
+		rec.Outcome = OutcomeRefused
+		return fail(fmt.Sprintf("Refused: an identical call to tool %q earlier in this request has an unknown outcome, so it will not be repeated. Check the current state another way, or tell the user the outcome is unknown.", call.Name))
+	}
 	toolCtx, cancel := context.WithTimeout(ctx, a.cfg.ToolTimeout)
 	defer cancel()
 	out, err := a.cfg.Tools.Call(toolCtx, call.Name, call.Args)
 	if err != nil {
 		if ce := errs.FromContext(ctx); ce != nil {
-			return llm.ToolResult{}, rec, ce
+			// The whole request ended while the call was in flight.
+			return llm.ToolResult{}, rec, errs.Wrap(ce.Kind, ce, "request ended while a call to tool %q was in flight; its outcome is unknown", call.Name)
 		}
 		switch errs.KindOf(err) {
 		case errs.Forbidden:
 			rec.Blocked = true
 			return fail(fmt.Sprintf("tool %q is not permitted", call.Name))
-		case errs.Timeout:
-			return fail(fmt.Sprintf("tool %q timed out", call.Name))
+		case errs.OutcomeUnknown, errs.Timeout:
+			unknown[key] = true
+			rec.Outcome = OutcomeUnknown
+			why := "no result was received"
+			if toolCtx.Err() != nil {
+				why = fmt.Sprintf("it did not answer within %s", a.cfg.ToolTimeout)
+			}
+			return fail(fmt.Sprintf("The call to tool %q did not complete: %s. The outcome is UNKNOWN: the tool may have run, and may still be running. Do not repeat this call. Check the current state with a read-only tool if one is available, or tell the user the outcome is unknown.", call.Name, why))
 		default:
 			return fail(fmt.Sprintf("tool %q failed", call.Name))
 		}

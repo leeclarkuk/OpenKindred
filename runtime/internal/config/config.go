@@ -49,6 +49,9 @@ type Limits struct {
 	RequestTimeout Duration `json:"requestTimeout"`
 	ToolTimeout    Duration `json:"toolTimeout"`
 	MaxToolCalls   int      `json:"maxToolCalls"`
+	// MaxConcurrent bounds invocations running at once. Requests beyond it are
+	// rejected immediately rather than queued.
+	MaxConcurrent int `json:"maxConcurrent"`
 }
 
 // Unresolved records a reference the composition could not resolve. Any entry makes
@@ -115,6 +118,9 @@ func (c *Config) applyDefaults() {
 	if c.Limits.MaxToolCalls == 0 {
 		c.Limits.MaxToolCalls = 10
 	}
+	if c.Limits.MaxConcurrent == 0 {
+		c.Limits.MaxConcurrent = 8
+	}
 	if c.Model.MaxOutputTokens == 0 {
 		c.Model.MaxOutputTokens = 1024
 	}
@@ -137,7 +143,7 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Instructions) == "" {
 		return errs.New(errs.InvalidConfig, "instructions are required")
 	}
-	if c.Model.MaxOutputTokens < 0 || c.Limits.MaxToolCalls < 0 || c.Limits.RequestTimeout < 0 || c.Limits.ToolTimeout < 0 {
+	if c.Model.MaxOutputTokens < 0 || c.Limits.MaxToolCalls < 0 || c.Limits.MaxConcurrent < 0 || c.Limits.RequestTimeout < 0 || c.Limits.ToolTimeout < 0 {
 		return errs.New(errs.InvalidConfig, "limits must not be negative")
 	}
 	seen := map[string]bool{}
