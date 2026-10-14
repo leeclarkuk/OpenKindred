@@ -1,0 +1,58 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mcpservers.openkindred.io
+spec:
+  group: openkindred.io
+  scope: Namespaced
+  names:
+    kind: McpServer
+    listKind: McpServerList
+    plural: mcpservers
+    singular: mcpserver
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Transport
+          type: string
+          jsonPath: .spec.transport
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [transport]
+              properties:
+                transport:
+                  type: string
+                  enum: [streamable-http, sse]
+                url:
+                  type: string
+                  description: Endpoint of an existing MCP server. Mutually exclusive with image.
+                image:
+                  type: string
+                  description: Container image to run as the MCP server. Mutually exclusive with url.
+                port:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                allowedTools:
+                  type: array
+                  description: Tool names exposed to agents. Empty means all.
+                  items:
+                    type: string
+              oneOf:
+                - required: [url]
+                - required: [image]
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

@@ -1,0 +1,97 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agents.openkindred.io
+spec:
+  group: openkindred.io
+  scope: Namespaced
+  names:
+    kind: Agent
+    listKind: AgentList
+    plural: agents
+    singular: agent
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Model
+          type: string
+          jsonPath: .spec.modelRef.name
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [modelRef, instructions]
+              properties:
+                modelRef:
+                  type: object
+                  required: [name]
+                  properties:
+                    name:
+                      type: string
+                instructions:
+                  type: string
+                  description: System prompt.
+                tools:
+                  type: array
+                  description: MCP servers this agent may call.
+                  items:
+                    type: object
+                    required: [mcpServerRef]
+                    properties:
+                      mcpServerRef:
+                        type: object
+                        required: [name]
+                        properties:
+                          name:
+                            type: string
+                      allowedTools:
+                        type: array
+                        items:
+                          type: string
+                memory:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    scope:
+                      type: string
+                      enum: [session, agent, namespace]
+                      default: session
+                browser:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                codeInterpreter:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    runtimeClassName:
+                      type: string
+                      description: Sandbox runtime, for example a micro-VM RuntimeClass.
+                peers:
+                  type: array
+                  description: Agents this agent may call over A2A.
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                      cluster:
+                        type: string
+                        description: Spoke cluster hosting the peer. Defaults to the local cluster.
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
