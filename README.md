@@ -42,7 +42,7 @@ agents/
   nightforge/   Autonomous coding pipeline
 docs/           Architecture and design notes
 examples/       Minimal worked examples
-hack/           Developer scripts
+hack/           Developer scripts (hub bootstrap, example validation)
 ```
 
 ## Contributing
