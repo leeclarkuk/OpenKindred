@@ -47,7 +47,7 @@ spec:
                   maximum: 65535
                 allowedTools:
                   type: array
-                  description: Tool names exposed to agents. Empty means all.
+                  description: Tool names exposed to agents. Omitted means all tools. An empty list means none.
                   items:
                     type: string
               oneOf:
