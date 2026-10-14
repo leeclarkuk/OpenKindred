@@ -31,6 +31,7 @@ A **hub** cluster runs the control plane: ArgoCD, Crossplane and KubeVela. **Spo
 ## Repository layout
 
 ```
+api/v1alpha1/  Custom resource definitions (Model, McpServer, Agent)
 platform/
   hub/          Hub control plane (ArgoCD, Crossplane, KubeVela)
   spoke/        Spoke cluster baseline
@@ -41,6 +42,7 @@ agents/
   nightforge/   Autonomous coding pipeline
 docs/           Architecture and design notes
 examples/       Minimal worked examples
+hack/           Developer scripts
 ```
 
 ## Contributing
